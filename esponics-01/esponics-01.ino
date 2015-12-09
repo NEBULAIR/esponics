@@ -15,11 +15,20 @@
  *  - DHT
  *  - Timer in user_interface
  *  
+ *  Serial Link commandes is composed by one letter and the value : YXXXXXXX
+ *  Commande detail :
+ *  - L > change start time of LAMP
+ *  - D > change day time duration of LAMP
+ *  - R > change pump flooding frequence
+ *  - F > change flooding duration
+ *  - P > Change the wifi pasword
+ *  - S > Change the SSID
+ *  - W > Write parameters in eeprom"
+ *  - T > Reset timing
+ *  
  *  
  *  TODO
  *  - Check for use of hardware interrupt for water sensor, May no be needed
- *  - Add serial config for all parameters
- *  - Add eeprom save of all parameters
  *  - Add thingspeak log on test channel
  *  - Add NTP time read function 
  *  - Add config from internet
@@ -31,11 +40,11 @@
 
 #include <ESP8266WiFi.h>
 #include <DHT.h>
+#include <EEPROM.h>
 
 extern "C" {
 #include "user_interface.h"
 }
-
 
 #define DEBUG 1 //Use DEBUG to reduce the time 1 minute = 5s
 
@@ -44,11 +53,8 @@ extern "C" {
 
 //Timer elements
 os_timer_t myTimer1;
-#define TIMER1 1000       //  1s for timer 1
 os_timer_t myTimer2;
-#define TIMER2 1000*60    // 60s for timer 2
 os_timer_t myTimer3;
-#define TIMER3 1000*60*5  // 5mn for timer 3
 // boolean to activate timer events
 bool tick1Occured;
 bool tick2Occured;
@@ -58,6 +64,7 @@ const char tickId1=1;
 const char tickId2=2;
 const char tickId3=3;
 // Functions declaration
+void timersSetup(void);
 void timerCallback(void *);
 void timerInit(os_timer_t *pTimerPointer, uint32_t milliSecondsValue, os_timer_func_t *pFunction, char *pId);
 
@@ -66,6 +73,7 @@ void timerInit(os_timer_t *pTimerPointer, uint32_t milliSecondsValue, os_timer_f
 void wifiConnect(void);
 //Wifi Global variables
 WiFiClient client;
+#define MAX_CONNEXION_TRY 50
 
 //Thingspeak config
 String myWriteAPIKey = TS_WRITE_KEY;
@@ -79,6 +87,7 @@ DHT dht(DHTPIN, DHT22,15);
 AquaponicsConfig conf;
 void ioInits(void);
 void printInfo(void);
+void waterControl(void);
 
 //Application values
 float temperature;
@@ -90,6 +99,17 @@ volatile int hoursCounter;    // 0 to 23
 volatile int secondsCounter;  // 0 to 59
 volatile int minutesCounter;  // 0 to 59
 
+//EEPROM Function declarations
+void eepromWrite(void);
+void eepromRead(void);
+//EEPROM Global variables
+bool needSave;
+
+// Serial string management variables
+void executeCommand();
+void serialStack();
+String inputString = "";         // a string to hold incoming data
+boolean stringComplete = false;  // whether the string is complete
 
 /* void setup(void) 
  *  Setup software run only once
@@ -104,42 +124,18 @@ void setup() {
   Serial.println("    ESP8266 Full Test     ");
   Serial.println("--------------------------");
  
-  //Init and start timers
-  tick1Occured = false;
-  tick2Occured = false;
-  tick3Occured = false;
- 
-  if(DEBUG)
-  { //Reduce timing for test and debug
-    timerInit(&myTimer1, 1000,  timerCallback, (char*)&tickId1);
-    timerInit(&myTimer2, 1000*5,  timerCallback, (char*)&tickId2);
-    timerInit(&myTimer3, 1000*60,  timerCallback, (char*)&tickId3);
-  }
-  else
-  { //Normal timing
-    timerInit(&myTimer1, TIMER1,  timerCallback, (char*)&tickId1);
-    timerInit(&myTimer2, TIMER2,  timerCallback, (char*)&tickId2);
-    timerInit(&myTimer3, TIMER3,  timerCallback, (char*)&tickId3);
-  }
-
+  timersSetup();
   ioInits();
 
-  hoursCounter = DAY_START;      // Init the time to DAY_START at startup
+  eepromRead();
+
+  hoursCounter = DAY_START;           // Init the time to DAY_START at startup
   minutesCounter = 1;
   digitalWrite(LAMP, HIGH);
-
-  //Init the config
-  strcpy(conf.ssid,WIFI_SSID);
-  strcpy(conf.password,WIFI_PASS);
-  conf.dayStart = DAY_START;           // Hour of the day that the lamp starts
-  conf.dayTime = DAY_TIME;            // Number of hours of daylight (LAMP ON)
-  conf.pumpCycle = PUMP_CYCLE;        // Time between 2 pump cycles
-  conf.floodedTime = WATER_UP_TIME;   // Time of water at high level
 
   printInfo();
   Serial.println("------");
   
-
   //Init wifi and web server
   wifiConnect();
 
@@ -161,6 +157,17 @@ void loop() {
     //Toggle LED
     digitalWrite(RED_LED, !digitalRead(RED_LED));
   }
+  
+  //Check if eeprom parameters need to be saved
+  if (needSave){
+    needSave = 0;
+    eepromWrite();
+  }
+  
+  //Check for serial input
+  serialStack();
+  //Execute recived command
+  executeCommand();
   
   //Timer 2 action every minutes
   if (tick2Occured == true){
@@ -197,61 +204,42 @@ void loop() {
     thingSpeakWrite (myWriteAPIKey, temperature, humidity, NAN, NAN, NAN, NAN, NAN, NAN);
   }
 
-  switch (waterLevelState) {
-    
-    case DOWN:
-        //Wait for pump cycle time to activate pump
-        if(0 == (minutesCounter % PUMP_CYCLE))
-        {
-          digitalWrite(PUMP_IN, 1);   // Turn ON the filling pump
-          Serial.println("Turn ON the finning pump");
-          waterLevelState = FILLING;
-        }
-      break;
-      
-    case FILLING:
-       // wait for water up sensor to be activated
-       if(0 == digitalRead(WATER_UP))
-        {
-          digitalWrite(PUMP_IN, 0); // Turn OFF the filling pump
-          Serial.println("Turn OFF the finning pump");
-          waterLevelState = UP;
-        }
-      break;
-      
-    case UP:
-        //Wait for level up time passed to clear 
-        if(0 == ((minutesCounter % PUMP_CYCLE) % WATER_UP_TIME))
-        {
-          digitalWrite(PUMP_OUT, 1);   // Turn ON the clearing pump
-          Serial.println("Turn ON the clearing pump");
-          waterLevelState = CLEARING;
-        }
-      break;
-      break;
-      
-    case CLEARING:
-        // wait for water down sensor to be activated
-        if(0 == digitalRead(WATER_DOWN))
-        {
-          digitalWrite(PUMP_OUT, 0); // Turn OFF the clearing pump
-          Serial.println("Turn OFF the clearing pump");
-          waterLevelState = DOWN;
-        }
-      break;
-      
-    default:
-      // default is optional
-    break;
-  }
+  waterControl();
  
   //Give th time to th os to do his things
   yield();  // or delay(0);
 }
 
+/* void timerSetup(void *pArg)
+ *  Setup all timers 
+ *  
+ *  Input  : 
+ *  Output :
+*/
+void timersSetup(void)
+{
+  //Init and start timers
+  tick1Occured = false;
+  tick2Occured = false;
+  tick3Occured = false;
+ 
+  if(DEBUG)
+  { //Reduce timing for test and debug
+    timerInit(&myTimer1, 1000,  timerCallback, (char*)&tickId1);
+    timerInit(&myTimer2, 1000*5,  timerCallback, (char*)&tickId2);
+    timerInit(&myTimer3, 1000*60,  timerCallback, (char*)&tickId3);
+  }
+  else
+  { //Normal timing
+    timerInit(&myTimer1, TIMER1,  timerCallback, (char*)&tickId1);
+    timerInit(&myTimer2, TIMER2,  timerCallback, (char*)&tickId2);
+    timerInit(&myTimer3, TIMER3,  timerCallback, (char*)&tickId3);
+  }
+}
 
 /* void timerCallback(void *pArg)
- *  Function 
+ *  Function called by the os_timers at every execution
+ *  Only one function is used for all timers, the timer id comm in the pArg
  *  
  *  Input  : 
  *  Output :
@@ -277,7 +265,7 @@ void timerCallback(void *pArg) {
 } 
 
 /* timerInit(os_timer_t *pTimerPointer, uint32_t milliSecondsValue, os_timer_func_t *pFunction, char *pId) 
- *  Function 
+ *  Start and init all timers 
  *  
  *  Input  : 
  *  Output :
@@ -309,34 +297,49 @@ void timerInit(os_timer_t *pTimerPointer, uint32_t milliSecondsValue, os_timer_f
 } 
 
 /* void wifiConnect(void)
- *  Function 
+ *  Try to connect to the wifi, stop after a time without success
  *  
  *  Input  : None
  *  Output : None
 */
 void wifiConnect(void){
+  
+  int wifiErrorCount;
+  
   // Connect to WiFi network
   Serial.println();
-  Serial.println();
-  Serial.print("Connecting to ");
+  Serial.println("Connecting to ");
   Serial.println(conf.ssid);
- 
+  Serial.println("Connecting to ");
+  Serial.println(conf.password);
+
   WiFi.begin(conf.ssid, conf.password);
- 
-  while (WiFi.status() != WL_CONNECTED) {
+  
+  wifiErrorCount = 0;
+  while (WiFi.status() != WL_CONNECTED and wifiErrorCount < MAX_CONNEXION_TRY )
+  {
     delay(500);
     Serial.print(".");
-    }
+    wifiErrorCount++;
+  }
   Serial.println("");
-  Serial.println("WiFi connected");
+  if (wifiErrorCount < MAX_CONNEXION_TRY)
+  {
+    Serial.println("WiFi connected");
+  }
+  else
+  {
+    Serial.println("WiFi not connected");
+  }
 }
 
 /* void thingSpeakWrite(void)
- *  Function 
- *  
- *  Input  : 
- *  Output :
+ *  Write data to thingspeak server 
  *  TODO Use a table as input
+ *  
+ *  Input  : APIKey - the write api key from the channel
+ *           fieldX - every channel values or NAN if not used
+ *  Output :
 */
 void thingSpeakWrite (String APIKey,
                       float field1, float field2, float field3, float field4,
@@ -404,7 +407,7 @@ void thingSpeakWrite (String APIKey,
 }
 
 /* void printInfo(void)
- *  Function 
+ *  Print all application info on the serial link 
  *  
  *  Input  : 
  *  Output :
@@ -420,7 +423,7 @@ void printInfo(void)
     Serial.println(waterLevelState);
 
     Serial.print("Flood every ");
-    Serial.print(conf.pumpCycle);
+    Serial.print(conf.pumpFreq);
     Serial.print("mn for ");
     Serial.print(conf.floodedTime);
     Serial.println("mn.");
@@ -438,7 +441,7 @@ void printInfo(void)
 }
 
 /* void ioInits(void)
- *  Function 
+ *  Init all Inputs and Outputs for the application 
  *  
  *  Input  : 
  *  Output :
@@ -460,3 +463,281 @@ void ioInits(void)
   pinMode(WATER_DOWN, INPUT_PULLUP);
 }
 
+/* void waterControl(void)
+ *  Control the pumps depending of the actual water state 
+ *  
+ *  Input  : 
+ *  Output :
+*/
+void waterControl(void)
+{
+  switch (waterLevelState) {
+    
+    case DOWN:
+        //Wait for pump frequence time to activate pump
+        if(0 == (minutesCounter % PUMP_FREQ))
+        {
+          digitalWrite(PUMP_IN, 1);   // Turn ON the filling pump
+          Serial.println("Turn ON the finning pump");
+          waterLevelState = FILLING;
+        }
+      break;
+      
+    case FILLING:
+       // wait for water up sensor to be activated
+       if(0 == digitalRead(WATER_UP))
+        {
+          digitalWrite(PUMP_IN, 0); // Turn OFF the filling pump
+          Serial.println("Turn OFF the finning pump");
+          waterLevelState = UP;
+        }
+      break;
+      
+    case UP:
+        //Wait for level up time passed to clear 
+        if(0 == ((minutesCounter % PUMP_FREQ) % WATER_UP_TIME))
+        {
+          digitalWrite(PUMP_OUT, 1);   // Turn ON the clearing pump
+          Serial.println("Turn ON the clearing pump");
+          waterLevelState = CLEARING;
+        }
+      break;
+      break;
+      
+    case CLEARING:
+        // wait for water down sensor to be activated
+        if(0 == digitalRead(WATER_DOWN))
+        {
+          digitalWrite(PUMP_OUT, 0); // Turn OFF the clearing pump
+          Serial.println("Turn OFF the clearing pump");
+          waterLevelState = DOWN;
+        }
+      break;
+      
+    default:
+      // default is optional
+    break;
+  }
+}
+
+
+
+/* void eepromWrite(void)
+ *  Write all application parameters in eeprom 
+ *  
+ *  Input  : 
+ *  Output :
+*/
+void eepromWrite(void)
+{
+  char letter;
+  int i, addr;
+  //Activate eeprom
+  EEPROM.begin(512);
+
+  Serial.println("Save application parameters in eeprom");
+
+  // advance to the next address.  there are 512 bytes in
+  // the EEPROM, so go back to 0 when we hit 512.
+  // save all changes to the flash.
+  addr = eeAddrSSID;
+  for (i = 0 ; i < eeSizeSSID ; i++)
+  { 
+    EEPROM.write(addr, conf.ssid[i]);
+    if('\0' == conf.ssid[i])
+      break;
+    addr++;
+  }
+  // advance to the next address.  there are 512 bytes in
+  // the EEPROM, so go back to 0 when we hit 512.
+  // save all changes to the flash.
+  addr = eeAddrPASS;
+  for (i = 0 ; i < eeSizePASS ; i++)
+  {
+    EEPROM.write(addr, conf.password[i]);
+    if('\0' == conf.password[i])
+      break;
+    addr++;
+  }
+
+  EEPROM.write(eeAddrDayStart, conf.dayStart);     // Hour of the day that the lamp starts
+  EEPROM.write(eeAddrDayTime, conf.dayTime);      // Number of hours of daylight (LAMP ON)
+  EEPROM.write(eeAddrPumpFreq, conf.pumpFreq);    // Time between 2 pump cycles
+  EEPROM.write(eeAddrFloodedTime, conf.floodedTime);  // Time of water at high level
+  
+  EEPROM.end();
+}
+
+/* void eepromRead(void)
+ *  Read all application parameters from eeprom 
+ *  
+ *  Input  : 
+ *  Output :
+*/
+void eepromRead(void)
+{
+  char letter;
+  int i, addr;
+  //Activate eeprom
+  EEPROM.begin(512);
+
+  // Get wifi SSID from eeprom
+  addr = eeAddrSSID;
+  for (i = 0 ; i < eeSizeSSID ; i++)
+  { 
+    conf.ssid[i] = EEPROM.read(addr);
+    if('\0' == conf.ssid[i])
+      break;
+    addr++;
+  }
+  
+  // Get wifi PASSWORD from eeprom
+  addr = eeAddrPASS;
+  for (i = 0 ; i < eeSizePASS ; i++)
+  {
+    conf.password[i] = EEPROM.read(addr);
+    if('\0' == conf.password[i])
+      break;
+    addr++;
+  }
+  
+  conf.dayStart    = EEPROM.read(eeAddrDayStart);     // Hour of the day that the lamp starts
+  conf.dayTime     = EEPROM.read(eeAddrDayTime);      // Number of hours of daylight (LAMP ON)
+  conf.pumpFreq   = EEPROM.read(eeAddrPumpFreq);    // Time between 2 pump cycles
+  conf.floodedTime = EEPROM.read(eeAddrFloodedTime);  // Time of water at high level
+
+  Serial.println("Application parameters read from eeprom");
+  printInfo();
+}
+
+/* void serialStack(void)
+ *  Stack all serial char received in one string until a '\n'
+ *  Set stringComplete to True when '\n' is received
+ *  This implementation is good enough for this project because serial commands
+ *  will be send slowly.
+*/
+void serialStack()
+{
+  if(Serial.available())
+  {
+    while (Serial.available()) {
+      // get the new byte:
+      char inChar = (char)Serial.read();
+      
+      // if the incoming character is a newline, set a flag
+      if (inChar == '\n' or inChar == '\r') 
+      {// so the main loop can do something about it
+        inputString += '\0';
+        stringComplete = true;
+      }
+      else
+      {// add it to the inputString
+        inputString += inChar;
+      }
+    }
+  }
+}
+
+/* void executeCommand(void)
+ *  Execute received serial command
+ *  Commandes list :
+ *   - "i", "I", "info", "Info" : Return basic system informations, mainly for debug purpose
+ *   - "FXX"                    : Setup the minimum temperature delta to activate the Airflow (0 to 100 C)
+ *   - "fXX"                    : Setup the maximum temperature delta to disable the Airflow (0 to 100 C)
+ *   - "S1" or "S0"             : Enable ("S1") or disable ("S0") the summer mode
+ *
+*/
+void executeCommand()
+{
+  if (stringComplete)
+  {
+    // Define the appropriate action depending on the first character of the string
+    switch (inputString[0]) 
+    {
+      // INFO Request
+      case 'i':
+      case 'I':
+        printInfo(); // Print on serial the system info
+        break;
+      // Day start time
+      case 'l':
+      case 'L':
+        inputString.remove(0,1);
+        Serial.print("L > change start time of LAMP to : ");
+        Serial.println(inputString);
+        conf.dayStart = byte(inputString.toInt());
+        break;
+      // Day duration time
+      case 'd':
+      case 'D':
+        inputString.remove(0,1);
+        Serial.print("D > change day time duration of LAMP to : ");
+        Serial.println(inputString);
+        conf.dayTime = byte(inputString.toInt());
+        break;
+      // Flooding pump frequency
+      case 'R':
+      case 'r':
+        inputString.remove(0,1);
+        Serial.print("P > change pump flooding frequence to : ");
+        Serial.println(inputString);
+        conf.pumpFreq = byte(inputString.toInt());
+        break;
+      // Flooding duration
+      case 'f':
+      case 'F':
+        inputString.remove(0,1);
+        Serial.print("F > change flooding duration to : ");
+        Serial.println(inputString);
+        conf.floodedTime = byte(inputString.toInt());
+        break;
+      // PASSWORD
+      case 'P':
+      case 'p':
+        inputString.remove(0,1);
+        Serial.print("P > Change the wifi pasword to : ");
+        Serial.println(inputString);
+        strcpy (conf.password, inputString.c_str());
+        break;
+      // SSID
+      case 'S':
+      case 's':
+        inputString.remove(0,1);
+        Serial.print("S > Change the SSID to : ");
+        Serial.println(inputString);
+        strcpy (conf.ssid, inputString.c_str());
+        break;
+      // Write command
+      case 'W':
+      case 'w':
+        inputString.remove(0,1);
+        Serial.println("W > Write parameters in eeprom");
+        eepromWrite();
+        break;
+      // Reset default timing config
+      case 'T':
+      case 't':
+        Serial.println("T > Reset timing");
+        conf.dayStart    = DAY_START;
+        conf.dayTime     = DAY_TIME;
+        conf.pumpFreq   = PUMP_FREQ;
+        conf.floodedTime = WATER_UP_TIME;
+        break;
+      // Reset Wifi Credential
+      // Reboot
+      
+      // Ignore (in case of /r/n)
+      case '\r':
+      case '\n':
+      case '\0':
+        break;
+      
+      // Unknown command 
+      default: 
+        Serial.print(inputString[0]);
+        Serial.println(" > ?");
+    }
+    inputString = "";
+    stringComplete = false;
+  }
+}
