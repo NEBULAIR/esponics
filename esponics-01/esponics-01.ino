@@ -14,6 +14,10 @@
  *  - DHT
  *  - Timer in user_interface
  *  
+ *  Comments:
+ *  - Relays are ON with 0
+ *  Led are ON with 0
+ *  
  *  Serial Link commandes is composed by one letter and the value : YXXXXXXX
  *  Commande detail :
  *  - L > change start time of LAMP
@@ -28,8 +32,9 @@
  *  
  *  
  *  TODO
- *  - Add thingspeak log on test channel
- *  - Add NTP time read function 
+ *  - Add NTP time read function
+ *  - See for start time up counter only when water is up
+ *  - See for start next filling action timer when the water is down
  *  - Add config from internet
  *  - Use a table for thingspeak inputs
  *  - Check for use of hardware interrupt for water sensor, May no be needed
@@ -415,26 +420,39 @@ void thingSpeakWrite (String APIKey,
 */
 void printInfo(void)
 {
-    Serial.print("MAC : ");
-    Serial.println(String(conf.mac,HEX));
-    Serial.print("Time : ");
+
+    Serial.print("----->>>>>> Time : ");
     Serial.print(hoursCounter);
     Serial.print(":");
-    Serial.println(minutesCounter);
-    Serial.print("Water level : ");
-    Serial.println(waterLevelState);
-
+    Serial.print(minutesCounter);
+    Serial.print(" MAC : ");
+    Serial.println(String(conf.mac,HEX));
+    
     Serial.print("Flood every ");
     Serial.print(conf.pumpFreq);
     Serial.print("mn for ");
     Serial.print(conf.floodedTime);
-    Serial.println("mn.");
+    Serial.print("mn.");
     
-    Serial.print("Start the lamp at ");
+    Serial.print(" Start the lamp at ");
     Serial.print(conf.dayStart);
     Serial.print("h for ");
     Serial.print(conf.dayTime);
     Serial.println("h.");
+    
+    Serial.print("Water level : ");
+    Serial.print(waterLevelState);
+    Serial.print(" PI[");
+    Serial.print(digitalRead(PUMP_IN));
+    Serial.print("] PO[");
+    Serial.print(digitalRead(PUMP_OUT));
+    Serial.print("] L[");
+    Serial.print(digitalRead(LAMP));
+    Serial.print("] U[");
+    Serial.print(digitalRead(WATER_UP));
+    Serial.print("] D[");
+    Serial.print(digitalRead(WATER_DOWN));
+    Serial.println("]");
 
     Serial.print("Temperature : ");
     Serial.print(temperature);
@@ -456,11 +474,16 @@ void ioInits(void)
   digitalWrite(BLUE_LED, HIGH);
   digitalWrite(RED_LED, HIGH);
   
-  // Setup the pin function
+  // Outputs for relays
   pinMode(LAMP, OUTPUT);
-  pinMode(LAMP, OUTPUT);
+  digitalWrite(LAMP, HIGH);
+  pinMode(FOG, OUTPUT);
+  digitalWrite(FOG, HIGH);
   pinMode(PUMP_IN, OUTPUT);
+  digitalWrite(PUMP_IN, HIGH);
   pinMode(PUMP_OUT, OUTPUT);
+  digitalWrite(PUMP_OUT, HIGH);
+  //Sensore inputs
   pinMode(WATER_UP, INPUT_PULLUP);
   pinMode(WATER_DOWN, INPUT_PULLUP);
 }
@@ -479,7 +502,8 @@ void waterControl(void)
         //Wait for pump frequence time to activate pump
         if(0 == (minutesCounter % PUMP_FREQ))
         {
-          digitalWrite(PUMP_IN, 1);   // Turn ON the filling pump
+          digitalWrite(PUMP_IN,  0);   // Turn ON the filling pump
+          digitalWrite(PUMP_OUT, 1);   // Turn OFF the clearing pump
           Serial.println("Turn ON the finning pump");
           waterLevelState = FILLING;
         }
@@ -487,9 +511,10 @@ void waterControl(void)
       
     case FILLING:
        // wait for water up sensor to be activated
-       if(0 == digitalRead(WATER_UP))
+       if(1 == digitalRead(WATER_UP))
         {
-          digitalWrite(PUMP_IN, 0); // Turn OFF the filling pump
+          digitalWrite(PUMP_IN,  1); // Turn OFF the filling pump
+          digitalWrite(PUMP_OUT, 1); // Turn OFF the clearing pump
           Serial.println("Turn OFF the finning pump");
           waterLevelState = UP;
         }
@@ -499,7 +524,8 @@ void waterControl(void)
         //Wait for level up time passed to clear 
         if(0 == ((minutesCounter % PUMP_FREQ) % WATER_UP_TIME))
         {
-          digitalWrite(PUMP_OUT, 1);   // Turn ON the clearing pump
+          digitalWrite(PUMP_IN,  1);   // Turn OFF the filling pump
+          digitalWrite(PUMP_OUT, 0);   // Turn ON the clearing pump
           Serial.println("Turn ON the clearing pump");
           waterLevelState = CLEARING;
         }
@@ -510,7 +536,8 @@ void waterControl(void)
         // wait for water down sensor to be activated
         if(0 == digitalRead(WATER_DOWN))
         {
-          digitalWrite(PUMP_OUT, 0); // Turn OFF the clearing pump
+          digitalWrite(PUMP_IN,  1); // Turn OFF the filling pump
+          digitalWrite(PUMP_OUT, 1); // Turn OFF the clearing pump
           Serial.println("Turn OFF the clearing pump");
           waterLevelState = DOWN;
         }
