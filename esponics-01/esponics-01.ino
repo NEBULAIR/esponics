@@ -6,7 +6,6 @@
  *  - The use of timers allows to optimize and creat time based environment
  *  - Configuration from serial link
  *  - Configuration saved in eeprom
- *  - Use a table for thingspeak inputs
  *  
  *
  *  Developed from :
@@ -25,16 +24,18 @@
  *  - S > Change the SSID
  *  - W > Write parameters in eeprom"
  *  - T > Reset timing
+ *  - H > Change thingspeak channel
  *  
  *  
  *  TODO
- *  - Check for use of hardware interrupt for water sensor, May no be needed
  *  - Add thingspeak log on test channel
  *  - Add NTP time read function 
  *  - Add config from internet
+ *  - Use a table for thingspeak inputs
+ *  - Check for use of hardware interrupt for water sensor, May no be needed
  *  
  */
-#include "thingspeak_log.h" //temp for test
+
 #include "hardware_def.h"
 #include "aquaponics.h"
 
@@ -75,16 +76,15 @@ void wifiConnect(void);
 WiFiClient client;
 #define MAX_CONNEXION_TRY 50
 
-//Thingspeak config
-String myWriteAPIKey = TS_WRITE_KEY;
 //Function declarations
-void thingSpeakWrite (String, float, float, float, float, float, float, float, float);
+void thingSpeakWrite (String, unsigned long, float, float, float, float, float, float, float);
 
 //Sensors config
 DHT dht(DHTPIN, DHT22,15);
 
 //Application config
 AquaponicsConfig conf;
+unsigned long getMacAddress(void);
 void ioInits(void);
 void printInfo(void);
 void waterControl(void);
@@ -127,6 +127,7 @@ void setup() {
   timersSetup();
   ioInits();
 
+  conf.mac = getMacAddress();
   eepromRead();
 
   hoursCounter = DAY_START;           // Init the time to DAY_START at startup
@@ -142,7 +143,6 @@ void setup() {
   //Init DHT temperature and Himidity reading
   dht.begin();
 }
-
 
 /* void loop(void) 
  *  Main program automatically loaded
@@ -201,7 +201,8 @@ void loop() {
     //Temperature and Humidity Reading
     humidity =    dht.readHumidity();
     temperature = dht.readTemperature();
-    thingSpeakWrite (myWriteAPIKey, temperature, humidity, NAN, NAN, NAN, NAN, NAN, NAN);
+    thingSpeakWrite ( conf.thingspeakApi, conf.mac, temperature, humidity, NAN,
+                      conf.dayStart, conf.dayTime, conf.pumpFreq, conf.floodedTime);
   }
 
   waterControl();
@@ -342,7 +343,7 @@ void wifiConnect(void){
  *  Output :
 */
 void thingSpeakWrite (String APIKey,
-                      float field1, float field2, float field3, float field4,
+                      unsigned long field1, float field2, float field3, float field4,
                       float field5, float field6, float field7, float field8)
 {
   
@@ -395,7 +396,7 @@ void thingSpeakWrite (String APIKey,
      client.print("POST /update HTTP/1.1\n");
      client.print("Host: api.thingspeak.com\n");
      client.print("Connection: close\n");
-     client.print("X-THINGSPEAKAPIKEY: "+myWriteAPIKey+"\n");
+     client.print("X-THINGSPEAKAPIKEY: "+String(conf.thingspeakApi)+"\n");
      client.print("Content-Type: application/x-www-form-urlencoded\n");
      client.print("Content-Length: ");
      client.print(postStr.length());
@@ -414,7 +415,8 @@ void thingSpeakWrite (String APIKey,
 */
 void printInfo(void)
 {
-  
+    Serial.print("MAC : ");
+    Serial.println(String(conf.mac,HEX));
     Serial.print("Time : ");
     Serial.print(hoursCounter);
     Serial.print(":");
@@ -520,8 +522,6 @@ void waterControl(void)
   }
 }
 
-
-
 /* void eepromWrite(void)
  *  Write all application parameters in eeprom 
  *  
@@ -537,9 +537,7 @@ void eepromWrite(void)
 
   Serial.println("Save application parameters in eeprom");
 
-  // advance to the next address.  there are 512 bytes in
-  // the EEPROM, so go back to 0 when we hit 512.
-  // save all changes to the flash.
+  // save wifi ssid in eeprom
   addr = eeAddrSSID;
   for (i = 0 ; i < eeSizeSSID ; i++)
   { 
@@ -548,14 +546,21 @@ void eepromWrite(void)
       break;
     addr++;
   }
-  // advance to the next address.  there are 512 bytes in
-  // the EEPROM, so go back to 0 when we hit 512.
-  // save all changes to the flash.
+  // save wifi password in eeprom
   addr = eeAddrPASS;
   for (i = 0 ; i < eeSizePASS ; i++)
   {
     EEPROM.write(addr, conf.password[i]);
     if('\0' == conf.password[i])
+      break;
+    addr++;
+  }
+  // save thingspeak api in eeprom
+  addr = eeAddrTSAPI;
+  for (i = 0 ; i < eeSizeTSAPI ; i++)
+  {
+    EEPROM.write(addr, conf.thingspeakApi[i]);
+    if('\0' == conf.thingspeakApi[i])
       break;
     addr++;
   }
@@ -597,6 +602,16 @@ void eepromRead(void)
   {
     conf.password[i] = EEPROM.read(addr);
     if('\0' == conf.password[i])
+      break;
+    addr++;
+  }
+  
+  // Get thingspeak api from eeprom
+  addr = eeAddrTSAPI;
+  for (i = 0 ; i < eeSizeTSAPI ; i++)
+  {
+    conf.thingspeakApi[i] = EEPROM.read(addr);
+    if('\0' == conf.thingspeakApi[i])
       break;
     addr++;
   }
@@ -707,6 +722,14 @@ void executeCommand()
         Serial.println(inputString);
         strcpy (conf.ssid, inputString.c_str());
         break;
+      // Thingspeak channel
+      case 'H':
+      case 'h':
+        inputString.remove(0,1);
+        Serial.print("H > Change the thingspeak write api to : ");
+        Serial.println(inputString);
+        strcpy (conf.thingspeakApi, inputString.c_str());
+        break;
       // Write command
       case 'W':
       case 'w':
@@ -740,4 +763,29 @@ void executeCommand()
     inputString = "";
     stringComplete = false;
   }
+}
+
+/* void executeCommand(void)
+ *  Get the board mac address
+ * 
+ *  Input  : 
+ *  Output : result mac address as int for id use
+*/
+unsigned long getMacAddress() {
+  byte mac[6];
+  unsigned long intMac = 0;
+  unsigned long intMacConv = 0;
+
+  //TODO see for full mac (6 numbers not 4)
+  
+  WiFi.macAddress(mac);
+  for (int i = 0; i < 4; ++i) 
+  {
+    intMacConv = mac[i];
+    intMac = intMac + (intMacConv <<(8*i));
+    //Serial.println(String(i));
+    //Serial.println(String(intMacConv<<(8*i),HEX));
+    //Serial.println(String(intMac, HEX));
+  }
+  return intMac;
 }

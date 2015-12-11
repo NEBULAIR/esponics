@@ -4,12 +4,14 @@
 
 
 struct AquaponicsConfig {
+  unsigned long mac;
   char ssid[32];
   char password[32];
-  byte  dayStart;       // Hour of the day that the lamp starts
-  byte  dayTime;        // Number of hours of daylight (LAMP ON)
-  byte  pumpFreq;      // Time between 2 pump cycles
-  byte  floodedTime;    // Time of water at high level
+  char thingspeakApi[32];
+  byte dayStart;       // Hour of the day that the lamp starts
+  byte dayTime;        // Number of hours of daylight (LAMP ON)
+  byte pumpFreq;      // Time between 2 pump cycles
+  byte floodedTime;    // Time of water at high level
 };
 
 //Timer config
@@ -22,6 +24,8 @@ struct AquaponicsConfig {
 #define eeSizeSSID         32     // size in the EEPROM  for SSID
 #define eeAddrPASS         32     // address in the EEPROM  for SSID
 #define eeSizePASS         32     // size in the EEPROM  for SSID
+#define eeAddrTSAPI        64     // address in the EEPROM  for SSID
+#define eeSizeTSAPI        32     // size in the EEPROM  for SSID
 #define eeAddrDayStart    511     // Hour of the day that the lamp starts
 #define eeAddrDayTime     510     // Number of hours of daylight (LAMP ON)
 #define eeAddrPumpFreq    509     // Time between 2 pump cycles
