@@ -116,6 +116,16 @@ void serialStack();
 String inputString = "";         // a string to hold incoming data
 boolean stringComplete = false;  // whether the string is complete
 
+
+//Web parameters Function declarations
+void checkWebValues(void);
+void getConfFromWeb(void);
+//Web parameters Variables
+byte webDayStart = 0;       // Hour of the day that the lamp starts
+byte webDayTime = 0;        // Number of hours of daylight (LAMP ON)
+byte webPumpFreq = 0;       // Time between 2 pump cycles
+byte webFloodedTime = 0;    // Time of water at high level
+
 /* void setup(void) 
  *  Setup software run only once
  *  
@@ -139,7 +149,6 @@ void setup() {
   minutesCounter = 1;
   digitalWrite(LAMP, HIGH);
 
-  printInfo();
   Serial.println("------");
   
   //Init wifi and web server
@@ -178,6 +187,10 @@ void loop() {
   if (tick2Occured == true){
     tick2Occured = false;
     minutesCounter ++;      //Increment the minutes counter
+
+    //check the config values on web
+    checkWebValues();
+    
     // Every  60min increment the hours counter
     if (0 == minutesCounter % 60)
     {
@@ -816,3 +829,98 @@ unsigned long getMacAddress() {
   }
   return intMac;
 }
+
+/* void getConfFromWeb(void) 
+ *  Download config file from webserver
+ *  
+ *  TODO: improve the seach pattern
+ *  TODO Make it not stoping the app (dedicated timer app?)
+*/
+void getConfFromWeb(void) {
+  const char* host = "nebulair.co";
+  String parametersString;
+  char parameters[32];
+  //Serial.print("connecting to ");
+  //Serial.println(host);
+  
+  // Use WiFiClient class to create TCP connections
+  WiFiClient client;
+  const int httpPort = 80;
+  if (!client.connect(host, httpPort)) {
+    Serial.print("connecting to ");
+    Serial.print(host);
+    Serial.println(" failed");
+    webDayStart    = 0;   
+    webDayTime     = 0; 
+    webPumpFreq    = 0;  
+    webFloodedTime = 0;
+    return;
+  }
+  
+  // We now create a URI for the request
+  String url = "/config-files/conf.310366044.txt";
+  //Serial.print("Requesting URL: ");
+  //Serial.println(url);
+  
+  // This will send the request to the server
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: " + host + "\r\n" + 
+               "Connection: close\r\n\r\n");
+  delay(500);
+  
+  // Read all the lines of the reply from server and print them to Serial
+  while(client.available()){
+    String line = client.readStringUntil('\r');
+      if (-1 != line.indexOf('>')){
+        parametersString = line.substring(line.indexOf('>')+1, line.indexOf('<'));
+        parametersString.toCharArray(parameters, parametersString.length()+1);
+        //Convert values
+        webDayStart    = atoi(strtok(parameters, ";"));   
+        webDayTime     = atoi(strtok(NULL, ";")); 
+        webPumpFreq    = atoi(strtok(NULL, ";"));  
+        webFloodedTime = atoi(strtok(NULL, ";"));
+         
+        //Serial.println(parameters);
+        //Serial.println(webDayStart);
+        //Serial.println(webDayTime);
+        //Serial.println(webPumpFreq);
+        //Serial.println(webFloodedTime);
+        //Stop looking
+        break;
+      }
+  }
+  
+  //Serial.println();
+  //Serial.println("closing connection");
+}
+
+
+/* void checkWebValues(void)
+ *  Chack and update config from web
+ * 
+ *  TODO Make it not stoping the app
+*/
+void checkWebValues(void)
+{
+  getConfFromWeb();
+  
+  //Check if parameters need to be adjusted
+  if( webDayStart != 0 & webDayTime != 0&
+      webPumpFreq != 0 & webFloodedTime != 0)
+  {
+    //Paremeters are valid, check if they are new
+    if( webDayStart != conf.dayStart| webDayTime != conf.dayTime| 
+        webPumpFreq != conf.pumpFreq| webFloodedTime != conf.floodedTime) 
+    {
+      //New parameters, Update values
+      conf.dayStart = webDayStart;
+      conf.dayTime = webDayTime;
+      conf.pumpFreq = webPumpFreq;
+      conf.floodedTime = webFloodedTime;
+      eepromWrite();
+      
+      Serial.println("Config Updated from web");
+    }
+  }
+}
+
