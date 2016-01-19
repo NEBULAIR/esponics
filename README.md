@@ -13,3 +13,8 @@ The solution is to download
  *  https://files.gitter.im/esp8266/Arduino/Abqa/libm.a.tbz
 and replace the one in
  *  C:\Users\xxxxx\AppData\Local\Arduino15\packages\esp8266\tools\xtensa-lx106-elf-gcc\1.20.0-26-gb404fb9\xtensa-lx106-elf\lib
+ 
+ 
+# serial link issue
+The use of the pin 15 apparently block the programmation of the firmware.
+The pin 15 have to be grounded or not used for programmation.
